@@ -1,5 +1,118 @@
 package tradelog.logic.command;
 
-//Handles creating a new Trade and adding it.
-public class AddCommand {
+import java.time.LocalDate;
+import java.util.HashMap;
+
+import tradelog.exception.TradeLogException;
+import tradelog.logic.parser.ArgumentTokeniser;
+import tradelog.logic.parser.ParserUtil;
+import tradelog.model.ModeManager;
+import tradelog.model.Trade;
+import tradelog.model.TradeList;
+import tradelog.storage.Storage;
+import tradelog.ui.Ui;
+
+/**
+ * Represents a command to add a new trade to the TradeLog.
+ * Handles parsing, strict validation of user arguments, and executing the addition.
+ */
+public class AddCommand extends Command {
+
+    /** The required prefixes for the add command. */
+    public static final String[] REQUIRED_PREFIXES = {
+        "t/", "d/", "dir/", "e/", "x/", "s/", "strat/"};
+
+    private final Trade addTrade;
+
+    /**
+     * Constructs an AddCommand by parsing and validating the raw arguments string.
+     *
+     * @param arguments The raw string after the "add" command word.
+     * @throws TradeLogException If any required prefix is missing or blank.
+     */
+    public AddCommand(String arguments) throws TradeLogException {
+        assert arguments != null : "Raw arguments string should not be null";
+        HashMap<String, String> parsedArgs = ArgumentTokeniser.tokenise(arguments, REQUIRED_PREFIXES);
+        for (String prefix : REQUIRED_PREFIXES) {
+            if (!parsedArgs.containsKey(prefix)) {
+                throw new TradeLogException("Missing required prefix: " + prefix);
+            }
+            if (parsedArgs.get(prefix).trim().isEmpty()) {
+                throw new TradeLogException("The value for " + prefix + " cannot be empty.");
+            }
+        }
+
+        double entryPrice = ParserUtil.parsePrice(parsedArgs.get("e/"), "Entry");
+        double exitPrice = ParserUtil.parsePrice(parsedArgs.get("x/"), "Exit");
+        double stopLossPrice = ParserUtil.parsePrice(parsedArgs.get("s/"), "Stop Loss");
+
+        ParserUtil.validatePrices(entryPrice, stopLossPrice);
+        ParserUtil.validateStopLoss(parsedArgs.get("dir/").trim(), entryPrice, stopLossPrice);
+
+        String ticker = ParserUtil.parseTicker(parsedArgs.get("t/"));
+        String direction = ParserUtil.parseDirection(parsedArgs.get("dir/"));
+        String date = ParserUtil.parseDate(parsedArgs.get("d/"));
+        String strategy = ParserUtil.parseStrategy(parsedArgs.get("strat/"));
+
+        this.addTrade = new Trade(ticker, date, direction,
+                entryPrice, exitPrice, stopLossPrice, strategy);
+
+        assert addTrade.getTicker().equals(ticker) : "Ticker should match parsed value";
+        assert addTrade.getEntryPrice() == entryPrice : "Entry price should match parsed value";
+        assert addTrade.getStrategy().equals(strategy) : "Last field check to ensure full assignment";
+    }
+
+    /**
+     * Executes the add command by adding the trade to the TradeList
+     * and displaying the trade summary to the user.
+     *
+     * @param tradeList The current list of trades.
+     * @param ui        The UI handler for output.
+     * @param storage   The storage handler for persistence.
+     */
+    @Override
+    public void execute(TradeList tradeList, Ui ui, Storage storage) {
+        assert tradeList != null : "TradeList should not be null when executing add";
+        assert ui != null : "Ui should not be null when executing add";
+        assert addTrade != null : "addTrade object should have been successfully created in constructor";
+
+        ModeManager modeManager = ModeManager.getInstance(); // This handles initialization safely
+        LocalDate today = LocalDate.now();
+
+        if (modeManager.isLive()) {
+            if (!LocalDate.parse(addTrade.getDate()).equals(today)) {
+                throw new TradeLogException("LIVE Mode: Only today's trades can be added.");
+            }
+        }
+
+        // SAFE ASSERTION: No side effects because modeManager is already initialized
+        assert !modeManager.isLive() || addTrade.getDate().equals(today.toString())
+                : "Trade date must be today when in LIVE mode";
+
+        int initialSize = tradeList.size();
+
+        if (tradeList.contains(addTrade)) {
+            throw new TradeLogException("Duplicate trade detected. This trade already exists.");
+        }
+
+        UndoCommand.saveState(tradeList);
+
+        tradeList.addTrade(addTrade);
+
+        assert tradeList.size() == initialSize + 1 : "TradeList size should increase by 1 after adding";
+
+        Trade lastTrade = tradeList.getTrade(tradeList.size() - 1);
+        assert lastTrade.getTicker().equals(addTrade.getTicker()) : "Last trade ticker should match added trade";
+        assert lastTrade.getEntryPrice() == addTrade.getEntryPrice() : "Last trade entryPrice should match added trade";
+        assert lastTrade.getStrategy().equals(addTrade.getStrategy()) : "Last trade strategy should match added trade";
+
+        try {
+            storage.saveTrades(tradeList);
+        } catch (Exception e) {
+            ui.showError("Warning: Changes made but failed to save to disk: " + e.getMessage());
+        }
+
+        ui.printTrade(addTrade);
+        ui.showTradeAdded();
+    }
 }
